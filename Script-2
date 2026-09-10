@@ -1,0 +1,456 @@
+####################################################################################################
+# Title: GATK MarkDuplicates for RNA-seq BAM Files
+# Author: R. Meller
+# Date: 2024 March
+#
+# Description:
+#   - Mark duplicate reads in the STAR-Bowtie2 aligned BAM files
+#   - Generate duplicate metrics for each sample
+#   - Index the marked BAM files for downstream GATK analysis
+#
+# Input:
+#   - Coordinate-sorted STAR-Bowtie2 BAM files
+#   - Project folder
+#
+# Output:
+#   - BAM files with duplicate reads marked
+#   - Duplicate metrics files
+#   - BAM index files
+#
+# Usage:
+#   cat samples.txt | parallel -j 8 ./05A_GATK-1.sh
+#
+# Software:
+#   - GATK
+#   - SAMtools
+#
+# Note: For GATK RNA-seq variant calling, we used STAR-aligned BAM files only because STAR is 
+#       splice-aware and preserves the gapped CIGAR structures required by GATK SplitNCigarReads; 
+#       Bowtie2 is not splice-aware and was therefore excluded from this step. 
+#####################################################################################################
+#####################################################################################################
+
+#!/bin/bash
+
+start=$(date +%s)
+echo "start time: $start"
+echo "running on $HOSTNAME"
+echo "sample name = $1"
+
+## make and define folders
+PROJECTS="/path/to/project/folder"
+
+# create output folder
+mkdir ${PROJECTS}/ANALYSIS/${1}/04_GATK
+out_dir="${PROJECTS}/ANALYSIS/${1}/04_GATK"
+
+# now define input folder
+in_dir="${PROJECTS}/ANALYSIS/${1}/03_GRCH38_AlignedData"
+cd ${in_dir}
+
+## define files for STAR
+REF="/path/to/reference/folder/Homo.sapiens.dna.mainchrs.fa"
+echo ${REF}
+
+GTF="/path/to/reference/folder/Homo_sapiens.GRCh38.109.gtf"
+echo ${GTF}
+
+## Each folder contains multiple folders of each sequencing chips worth of data.  
+
+
+for DIR in $(ls | grep -v ".txt" )
+
+do
+	echo "$DIR"
+	mkdir ${out_dir}/${DIR}
+	gatkout="${out_dir}/${DIR}"
+
+#This creates an item (call of the program) the call is echo’ed and then ran with eval. This is useful for running large numbers of files with and collecting log files for the run, so you can see what went wrong. 
+ 
+
+call1a="GATK MarkDuplicates -I ${in_dir}/${DIR}/${DIR}Aligned.sortedByCoord.out.bam \
+-O ${out_dir}/${DIR}/${DIR}_marked_duplicates.bam \
+-M ${out_dir}/${DIR}/${DIR}_marked_dup_metrics.txt"
+
+echo $call1a
+eval $call1a
+
+
+call1b="samtools index -@ 12 ${out_dir}/${DIR}/${DIR}_marked_duplicates.bam"
+
+echo $call1b
+eval $call1b
+
+done
+
+
+end=$(date +%s)
+echo "end time: $end"
+runtime_s=$(echo $(( end - start )))
+echo " time in sec: $runtime_s"
+sec_per_min=60
+sec_per_hr=3600
+runtime_m=$(echo "scale=2; $runtime_s / $sec_per_min;" | bc)
+echo "total run time Min: $runtime_m"
+runtime_h=$(echo "scale=2; $runtime_s / $sec_per_hr;" | bc)
+echo "total run time hours : $runtime_h"
+
+***
+
+
+####################################################################################################
+####################################################################################################
+# Title: GATK RNA-seq BAM Processing and Base Quality Score Recalibration
+# Author: R. Meller
+# Date: 2024 March
+#
+# Description:
+#   - Split RNA-seq reads spanning introns using GATK SplitNCigarReads
+#   - Perform base quality score recalibration (BQSR) using known variant sites
+#   - Generate recalibration plots for quality assessment
+#   - Apply the recalibration model to the BAM files
+#
+# Input:
+#   - Marked-duplicate RNA-seq BAM files
+#   - GRCh38 reference genome
+#   - Known variant VCF files for BQSR
+#
+# Output:
+#   - Split BAM files
+#   - BQSR recalibration tables
+#   - AnalyzeCovariates PDF plots
+#   - BQSR-applied BAM files
+#
+# Usage:
+#   cat samples.txt | parallel -j 8 ./05B_GATK-2.sh
+#
+# Software:
+#   - GATK
+#   - SAMtools
+####################################################################################################
+####################################################################################################
+
+#!/bin/bash
+
+start=$(date +%s)
+echo "start time: $start"
+echo "running on $HOSTNAME"
+echo "sample name = $1"
+
+## make and define folders
+PROJECTS="/path/to/project/folder"
+
+# set the path for output folder
+out_dir="${PROJECTS}/ANALYSIS/${1}/04_GATK"
+cd ${out_dir}
+
+## define files for STAR
+REF_DIR="/path/to/reference/folder/GRCH38_MainChrs"
+REF="/path/to/reference/folder/Homo_sapiens.GRCh38.dna.mainchrs.fa"
+echo ${REF}
+
+GTF="/path/to/reference/folder/Homo_sapiens.GRCh38.109.gtf"
+echo ${GTF}
+vcf_refs="/path/to/reference/folder/GRCH38_MainChrs/VCF_Files"
+
+## Each folder contains multiple folders of each sequencing chips worth of data.  
+
+for DIR in $(ls | grep -v ".txt" )
+
+do
+	echo "$DIR"
+	#mkdir ${out_dir}/${DIR}
+	gatkout="${out_dir}/${DIR}"
+
+#This creates an item (call of the program) the call is echo’ed and then ran with eval. This is useful for running large numbers of files with and collecting log files for the run, so you can see what went wrong. 
+
+
+call2="gatk --java-options "-Xmx100G" SplitNCigarReads \
+-R $REF \
+-I ${out_dir}/${DIR}/${DIR}_marked_duplicates.bam \
+-O ${out_dir}/${DIR}/${DIR}_Split.bam"
+
+echo $call2
+eval $call2
+## Downloaded files had to be cleaned up prior to use.  Remove odd ";;" on a line using sed 's/;;/;/g'then re compress
+## Index with GATK and add the sequence dictionary to the file. GATK 
+## "for f in $(basename *.d.vcf.gz; do  GATK UpdateVCFSequenceDictionary -V ${f}.d.vcf.gz --source-dictionary /REF/REFERENCES/GRCH38_MainChrs/*.dict --output ${f}.d.vcf.gz; done"
+## Then use in tool
+## must index all files prior to running with bcftools index -c *.vcf.gz  !!better to Use GATK IndexFaetureFile to create .tbi file or iuse index -t
+## NB GATK tools has a hdstack issue with alt variants.
+## rem all GZipping of these files should be with bgzip NOT gzip
+
+call3="gatk --java-options "-Xmx100G" BaseRecalibrator \
+-I ${out_dir}/${DIR}/${DIR}_Split.bam \
+-R $REF \
+-O ${out_dir}/${DIR}/${DIR}_recal_data.table \
+--known-sites $vcf_refs/1000GENOMES-phase_3.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr10.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr11.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr12.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr13.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr14.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr15.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr16.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr17.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr18.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr19.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr1.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr20.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr21.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr22.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr2.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr3.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr4.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr5.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr6.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr7.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr8.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chr9.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chrMT.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chrX.d.vcf.gz \
+--known-sites $vcf_refs/homo_sapiens-chrY.d.vcf.gz \
+#--known-sites $vcf_refs/homo_sapiens_structural_variations.vcf.gz \
+--sequence-dictionary ${REF_DIR}/Homo_sapiens.GRCh38.dna.mainchrs.dict"
+
+echo $call3
+eval $call3
+
+
+call4="GATK --java-options "-Xmx100G" AnalyzeCovariates -bqsr ${out_dir}/${DIR}/${DIR}_recal_data.table -plots ${out_dir}/${DIR}/${DIR}_AnalyzeCovariates.pdf"
+
+echo $call4
+eval $call4
+
+
+call5="gatk --java-options "-Xmx100G" ApplyBQSR -R $REF\
+ -I ${out_dir}/${DIR}/${DIR}_Split.bam \
+--bqsr-recal-file ${out_dir}/${DIR}/${DIR}_recal_data.table \
+-O ${out_dir}/${DIR}/${DIR}_BSQR-applied.out.bam"
+
+echo $call5
+eval $call5
+
+#rm ${out_dir}/${DIR}/${DIR}_marked_duplicates.bam
+
+done
+
+
+end=$(date +%s)
+echo "end time: $end"
+runtime_s=$(echo $(( end - start )))
+echo "total run time in sec: $runtime_s"
+sec_per_min=60
+sec_per_hr=3600
+runtime_m=$(echo "scale=2; $runtime_s / $sec_per_min;" | bc)
+echo "total run time in min: $runtime_m"
+runtime_h=$(echo "scale=2; $runtime_s / $sec_per_hr;" | bc)
+echo "total run time in hours: $runtime_h"
+
+***
+
+
+#############################################################################################
+#############################################################################################
+# Title: Per-Sample RNA-seq Variant Calling with GATK HaplotypeCaller
+# Author: R. Meller
+# Date: 2024 March
+#
+# Description:
+#   - Call variants from BQSR-applied RNA-seq BAM files using GATK HaplotypeCaller
+#   - Generate a genomic VCF (GVCF) for each sample
+#   - Apply GATK standard and allele-specific annotations
+#   - Index the generated GVCF files for downstream joint genotyping
+#
+# Input:
+#   - BQSR-applied RNA-seq BAM files
+#   - GRCh38 reference genome
+#
+# Output:
+#   - Per-sample GVCF files (.vcf.gz)
+#   - GVCF index files (.tbi)
+#
+# Usage:
+#   cat NEW_All_samples.txt | parallel -j 8 ../../Scripts/05C_GATK-3.sh
+#
+# Software:
+#   - GATK
+#   - BCFtools
+#   - BGZIP
+#   - Tabix
+#############################################################################################
+#############################################################################################
+
+#!/bin/bash
+
+start=$(date +%s)
+echo "start time: $start"
+echo "running on $HOSTNAME"
+echo "sample name = $1"
+
+## make and define folders
+PROJECTS="/path/to/project/folder/"
+
+# set the path for output folder
+out_dir="${PROJECTS}/ANALYSIS/${1}/04_GATK"
+
+# now define input folder
+in_dir="${PROJECTS}/ANALYSIS/${1}/04_GATK"
+cd ${in_dir}
+
+## define files for STAR
+REF_DIR="/path/to/reference/folder/GRCH38_MainChrs"
+REF="/path/to/reference/folder/Homo_sapiens.GRCh38.dna.mainchrs.fa"
+echo ${REF}
+
+GTF="/path/to/reference/folder/Homo_sapiens.GRCh38.109.gtf"
+echo ${GTF}
+vcf_refs="/path/to/reference/folder/GRCH38_MainChrs/VCF_Files/"
+echo ${vcf_refs}
+
+## Each folder contains multiple folders of each sequencing chips worth of data.  
+
+for DIR in $(ls | grep -v ".txt" )
+
+do
+	echo "$DIR"
+	#mkdir ${out_dir}/${DIR}
+	gatkout="${out_dir}/${DIR}"
+	echo ${gatkout}
+
+#This creates an item (call of the program) the call is echo’ed and then ran with eval. This is useful for running large numbers of files with and collecting log files for the run, so you can see what went wrong. 
+
+
+call6="GATK --java-options "-Xmx100G" HaplotypeCaller \
+	-R ${REF} \
+	-I ${out_dir}/${DIR}/${1}_BSQR-applied.out.bam \
+	-O ${out_dir}/${1}.vcf.gz \
+	-ERC GVCF \
+	--standard-min-confidence-threshold-for-calling 10 \
+	-G StandardAnnotation \
+	-G AS_StandardAnnotation"
+
+
+echo $call6
+eval $call6
+
+done
+
+end=$(date +%s)
+echo "end time: $end"
+runtime_s=$(echo $(( end - start )))
+echo "total run time in sec: $runtime_s"
+sec_per_min=60
+sec_per_hr=3600
+runtime_m=$(echo "scale=2; $runtime_s / $sec_per_min;" | bc)
+echo "total run time in min: $runtime_m"
+runtime_h=$(echo "scale=2; $runtime_s / $sec_per_hr;" | bc)
+
+
+***
+
+
+##########################################################################################################
+##########################################################################################################
+# Title: MECA Joint Genotyping and Variant calling
+# Author: R. Meller
+# Date: 2024 March
+#
+# Description:
+#   - Import per-sample GVCFs into a GenomicsDB workspace
+#   - Jointly genotype variants across MECA samples
+#   - Generate a cohort-level VCF file
+#
+# Input:
+#   - Per-sample GVCF files listed in Samples.map
+#   - GRCh38 reference genome
+#   - GRCh38 interval list
+#
+# Output:
+#   - GenomicsDB workspace
+#   - Jointly genotyped MECA VCF file
+#   - Variant-filtered VCF file
+#
+# Usage:
+#   ./05D_GATK-4.sh
+#
+# Software:
+#   - GATK
+##########################################################################################################
+##########################################################################################################
+
+#!/bin/bash
+
+start=$(date +%s)
+echo "start time: $start"
+echo "running on $HOSTNAME"
+echo "sample name = $1"
+
+## make and define folders
+PROJECTS="/path/to/project/folder/"
+
+# create output folder
+#mkdir ${PROJECTS}/ANALYSIS/${1}/05_GATK
+out_dir="${PROJECTS}/ANALYSIS/${1}/04_GATK"
+
+# now define input folder
+in_dir="${PROJECTS}/ANALYSIS/${1}/03_GRCH38_AlignedData"
+
+
+## define files for STAR
+REF_DIR="/path/to/reference/folder/GRCH38_MainChrs"
+REF="/path/to/reference/folder/Homo_sapiens.GRCh38.dna.mainchrs.fa"
+echo ${REF}
+
+GTF="/path/to/reference/folder/Homo_sapiens.GRCh38.109.gtf"
+echo ${GTF}
+vcf_refs="/path/to/reference/folder/GRCH38_MainChrs/VCF_Files/"
+
+
+GATKRES="${PROJECTS}/RESULTS/GATK_Results"
+
+## Each folder contains multiple folders of each sequencing chips worth of data.  
+## These have been processed so there is one vcf file in the 04_GATK folder for each sample ${1}
+
+
+# This creates an item (call of the program) the call is echo’ed and then ran with eval. This is useful for running large numbers of files with and collecting log files for the run, so you can see what went wrong. 
+# Genomics import either uses a list of samples written into the code, or uses a list
+
+
+call7="GATK --java-options "-Xmx40G" GenomicsDBImport \
+	--genomicsdb-workspace-path ${GATKRES}/VCFMECA_visit1 \
+	-R ${REF} \
+	--reader-threads 10 \
+	-L ${REF_DIR}/Homo_sapiens.GRCh38.dna.mainchrs.interval_list \
+	--sample-name-map Samples.map"
+
+
+echo $call7
+eval $call7
+
+call8="GATK --java-options "-Xmx40G" GenotypeGVCFs \
+	-R ${REF} \
+	-V gendb://RESULTS/GATK_Results/VCFMECA_visit1 \
+	-G StandardAnnotation \
+	-G AS_StandardAnnotation \
+	-O ${GATKRES}/MECA_visit1.vcf.gz"
+
+echo $call8
+eval $call8
+
+done
+
+end=$(date +%s)
+echo "end time: $end"
+runtime_s=$(echo $(( end - start )))
+echo "total run time in sec: $runtime_s"
+sec_per_min=60
+sec_per_hr=3600
+runtime_m=$(echo "scale=2; $runtime_s / $sec_per_min;" | bc)
+echo "total run time in min: $runtime_m"
+runtime_h=$(echo "scale=2; $runtime_s / $sec_per_hr;" | bc)
+echo "total run time in hours: $runtime_h"
+
+
+***
+
